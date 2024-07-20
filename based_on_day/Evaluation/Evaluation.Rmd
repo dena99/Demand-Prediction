@@ -1,0 +1,341 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.14.4
+  kernelspec:
+    display_name: Python 3 (ipykernel)
+    language: python
+    name: python3
+---
+
+<!-- #region tags=[] -->
+# Imports
+<!-- #endregion -->
+
+```{python tags=c()}
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import pyarrow.parquet as pq
+import seaborn as sns
+from itertools import product
+from sklearn.metrics import mean_absolute_error
+from sklearn.metrics import mean_absolute_percentage_error
+from sklearn.metrics import mean_squared_error
+```
+
+```{python}
+# %matplotlib inline
+```
+
+# Config
+
+```{python}
+DATA_FILE_PATHS = '/workspace/rahnemacollege/Project/Git/demand-prediction/data'
+SHAPE_FILE_PATH = '/workspace/rahnemacollege/Project/Git/demand-prediction/map_data/taxi_zones/taxi_zones.shp'
+LR_PATH = '/workspace/rahnemacollege/Project/Git/demand-prediction/data/lr_result.parquet'
+XGB_PATH = '/workspace/rahnemacollege/Project/Git/demand-prediction/data/XGB_result.parquet'
+
+PRED_RESULT_PATH = '/workspace/rahnemacollege/Project/Git/demand-prediction/data/Pred_Result.csv'
+
+start_date_test = '2023-04-01'
+end_date_test = '2023-05-01'
+```
+
+# Load Data files
+
+```{python tags=c()}
+def load_data(file_paths):
+    df = pd.read_parquet(file_paths).reset_index()
+    df = df.rename(columns={'real demand': 'count',
+                   'predicted demand': 'pred_count'})
+    return df
+```
+
+```{python}
+lr_rides_df = load_data(LR_PATH)
+print(lr_rides_df.shape)
+lr_rides_df.head()
+```
+
+```{python}
+xgb_rides_df = load_data(XGB_PATH)
+print(xgb_rides_df.shape)
+xgb_rides_df.head()
+```
+
+### Improved Data Bound Within Range: 2023-04-01 to 2023-04-30
+
+For Model Evaluation
+
+```{python tags=c()}
+def df_time_bound(df):
+    df['date'] = pd.to_datetime(df['date'])
+    filtered_rides_df = df[(df['date'] >= start_date_test) & (
+        df['date'] < end_date_test)]
+    # Sort the DataFrame based on the 'tpep_pickup_datetime' column in ascending order
+    filtered_rides_df = filtered_rides_df.sort_values(by='date')
+    filtered_rides_df = filtered_rides_df.reset_index(drop=True)
+    return filtered_rides_df
+```
+
+```{python tags=c()}
+lr_rides_df = df_time_bound(lr_rides_df)
+print(lr_rides_df.shape)
+lr_rides_df.head()
+```
+
+```{python tags=c()}
+xgb_rides_df = df_time_bound(xgb_rides_df)
+print(xgb_rides_df.shape)
+xgb_rides_df.head()
+```
+
+```{python}
+predictions_dict = {
+    'baseline_last_week': None,
+    'model_regression': None,
+    'model_xgboost': None
+}
+```
+
+```{python}
+predictions_dict['baseline_last_week'] = xgb_rides_df[['date', 'PULocationID',
+                                                       'last_week_demand']].rename(columns={'last_week_demand': 'pred_count'})
+```
+
+```{python}
+predictions_dict['model_regression'] = lr_rides_df[[
+    'date', 'PULocationID', 'pred_count']]
+```
+
+```{python}
+predictions_dict['model_xgboost'] = xgb_rides_df[[
+    'date', 'PULocationID', 'pred_count']]
+```
+
+```{python}
+predictions_dict
+```
+
+# Report by Metrics
+
+
+### Calculate metrics for all predictions model per all LocationIDs
+
+```{python tags=c()}
+PULocationIDs = xgb_rides_df['PULocationID'].unique()
+PULocationIDs.sort()
+metrics_all = []
+for key in predictions_dict:
+    for locationID in PULocationIDs:
+        selected_df_model = predictions_dict[key][predictions_dict[key]
+                                                  ['PULocationID'] == locationID]
+        selected_df_actual = xgb_rides_df[xgb_rides_df['PULocationID'] == locationID]
+        metric_mape = mean_absolute_percentage_error(
+            selected_df_actual['count'], selected_df_model['pred_count'])
+        metric_mae = mean_absolute_error(
+            selected_df_actual['count'], selected_df_model['pred_count'])
+        metric_rmse = mean_squared_error(
+            selected_df_actual['count'], selected_df_model['pred_count'], squared=False)
+        metrics_all.append({'PULocationID': locationID, 'Model': key, 'MAPE': metric_mape,
+                           'MAE': metric_mae, 'RMSE': metric_rmse})
+
+
+PULocationIDs_Metrics = pd.DataFrame(metrics_all)
+```
+
+```{python}
+print(PULocationIDs_Metrics.shape)
+PULocationIDs_Metrics.head()
+```
+
+<!-- #region tags=[] -->
+# Visualization
+<!-- #endregion -->
+
+### Compare Models prediction vs. Last day count base on MAPE metric
+
+```{python}
+def plot_model_metric(df, sorted_df, lower, upper, metrics):
+    PULocationIDs_Metrics_Selected = sorted_df[sorted_df['PULocationID'].isin(
+        df.iloc[lower:upper, 0])]
+    PULocationIDs_Metrics_Selected = PULocationIDs_Metrics_Selected.copy()
+    PULocationIDs_Metrics_Selected['PULocationID'] = PULocationIDs_Metrics_Selected['PULocationID'].astype(
+        'str')
+    plt.figure(figsize=(20, 5))
+    sns.lineplot(data=PULocationIDs_Metrics_Selected,
+                 x='PULocationID', y=metrics, hue='Model')
+    plt.xticks(rotation=90)
+    plt.title(f'Show Metric {metrics} For Location Id')
+    plt.show()
+```
+
+```{python}
+# Prepare data for sorting based on demands count
+xgb_rides_df_sorted = xgb_rides_df.groupby('PULocationID')[['count']].mean(
+).sort_values('count', ascending=False).reset_index()
+dummy = pd.Series(xgb_rides_df_sorted['PULocationID']).to_frame()
+PULocationIDs_Metrics_sorted = pd.merge(dummy, PULocationIDs_Metrics,
+                                        on='PULocationID', how='left')
+```
+
+<!-- #region tags=[] -->
+#### High Demand
+<!-- #endregion -->
+
+```{python}
+plot_model_metric(xgb_rides_df_sorted,
+                  PULocationIDs_Metrics_sorted, 0, 50, 'MAPE')
+```
+
+#### Mid Demand
+
+```{python}
+plot_model_metric(xgb_rides_df_sorted,
+                  PULocationIDs_Metrics_sorted, 50, 150, 'MAE')
+```
+
+#### Low Demand
+
+```{python}
+plot_model_metric(xgb_rides_df_sorted,
+                  PULocationIDs_Metrics_sorted, 150, 250, 'MAE')
+```
+
+### Compare Models predicion vs. Last day count based on actual count
+
+```{python}
+def plot_model_actual(actual_data, pred_dict, lower_bound=0, upper_bound=262):
+    selected_df_model = actual_data.groupby('PULocationID')[['count']].mean(
+    ).sort_values('count', ascending=False).reset_index()
+
+    selected_df_model = selected_df_model.iloc[lower_bound:upper_bound]
+
+    plt.figure(figsize=(15, 5))
+    plt.scatter(selected_df_model.index,
+                selected_df_model['count'], label="Actual", color='red', s=15)
+    for key in pred_dict:
+        sorted_df = pd.merge(
+            selected_df_model['PULocationID'], pred_dict[key], on='PULocationID', how='left')
+        sorted_df = sorted_df.groupby('PULocationID')[['pred_count']].mean(
+        ).sort_values('pred_count', ascending=False).reset_index()
+        plt.plot(selected_df_model.index, sorted_df['pred_count'], label=key)
+
+    plt.xticks(selected_df_model.index,
+               selected_df_model['PULocationID'], rotation=90)
+
+    plt.legend()
+    plt.xlabel('PULocationID')
+    plt.ylabel('Counts')
+    plt.title('Demand count compare models predictions vs. actual')
+
+    plt.show()
+```
+
+<!-- #region tags=[] -->
+#### High Demand
+<!-- #endregion -->
+
+```{python}
+plot_model_actual(xgb_rides_df, predictions_dict, 0, 50)
+```
+
+<!-- #region tags=[] -->
+#### Mid Demand
+<!-- #endregion -->
+
+```{python}
+plot_model_actual(xgb_rides_df, predictions_dict, 50, 150)
+```
+
+#### Low Demand
+
+```{python}
+plot_model_actual(xgb_rides_df, predictions_dict, 150, 250)
+```
+
+# Model prediction results in metrics
+
+Metrics: MAPE, MAE, RMSE
+
+```{python}
+def caculate_metrics(df, sorted_df, lower=0, upper=266):
+    PULocationIDs_Metrics_Selected = sorted_df[sorted_df['PULocationID'].isin(
+        df.iloc[lower:upper, 0])]
+    PULocationIDs_Metrics_Selected = PULocationIDs_Metrics_Selected.copy()
+    PULocationIDs_Metrics_Selected['PULocationID'] = PULocationIDs_Metrics_Selected['PULocationID'].astype(
+        'str')
+    predictions_result = []
+    for key in predictions_dict:
+        metric_mape = PULocationIDs_Metrics_Selected[PULocationIDs_Metrics_Selected['Model'] == key]['MAPE'].mean(
+        )
+        metric_mae = PULocationIDs_Metrics_Selected[PULocationIDs_Metrics_Selected['Model'] == key]['MAE'].mean(
+        )
+        metric_rmse = PULocationIDs_Metrics_Selected[PULocationIDs_Metrics_Selected['Model'] == key]['RMSE'].mean(
+        )
+        predictions_result.append({'Model': key, f"MAPE_{lower}-{upper}": metric_mape, f"MAE_{lower}-{upper}": metric_mae,
+                                   f"RMSE_{lower}-{upper}": metric_rmse})
+    return predictions_result
+```
+
+<!-- #region tags=[] -->
+#### High Demand
+<!-- #endregion -->
+
+```{python}
+df1 = pd.DataFrame(caculate_metrics(
+    xgb_rides_df_sorted, PULocationIDs_Metrics_sorted, 0, 50))
+```
+
+<!-- #region tags=[] -->
+#### Mid Demand
+<!-- #endregion -->
+
+```{python}
+df2 = pd.DataFrame(caculate_metrics(
+    xgb_rides_df_sorted, PULocationIDs_Metrics_sorted, 50, 150))
+```
+
+#### Low Demand
+
+```{python}
+df3 = pd.DataFrame(caculate_metrics(
+    xgb_rides_df_sorted, PULocationIDs_Metrics_sorted, 150, 250))
+```
+
+Merge all the results together and sort them
+
+```{python}
+merged_result_df = df1.merge(df2, on='Model').merge(df3, on='Model')
+```
+
+```{python}
+# Define a custom sorting function to extract the numeric suffix and sort the columns accordingly
+def sort_columns_key(column):
+    if column == 'Model':
+        return (0, '')
+    metric, suffix = column.split('_')
+    return (1, metric, int(suffix.split('-')[0]), int(suffix.split('-')[1]))
+
+
+sorted_columns = sorted(merged_result_df.columns, key=sort_columns_key)
+```
+
+```{python}
+predictions_result = merged_result_df[sorted_columns]
+```
+
+```{python}
+display(predictions_result)
+```
+
+#### Save Metrics output to File
+
+```{python}
+predictions_result.to_csv(PRED_RESULT_PATH)
+```

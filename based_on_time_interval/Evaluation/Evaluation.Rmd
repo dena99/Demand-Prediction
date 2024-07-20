@@ -1,0 +1,477 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.14.7
+  kernelspec:
+    display_name: Python 3
+    name: python3
+---
+
+<!-- #region id="ZpWmAp3dO9-3" -->
+# Imports
+<!-- #endregion -->
+
+```{python id="673ymvGDOY0Y"}
+import math
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import pyarrow.parquet as pq
+import seaborn as sns
+import warnings
+from itertools import product
+from sklearn.metrics import mean_absolute_error
+from sklearn.metrics import mean_absolute_percentage_error
+from sklearn.metrics import mean_squared_error
+
+warnings.filterwarnings('ignore')
+```
+
+<!-- #region id="KtoP1TBcPEp5" -->
+# Config
+<!-- #endregion -->
+
+```{python id="5BbBlVpqPDLX"}
+LR_PATH = '/content/drive/MyDrive/RC/output/time_interval_lr_result.parquet'
+XGB_PATH = '/content/drive/MyDrive/RC/output/time_interval_XGB_result.parquet'
+TEST_DATE = '2023-04-01'
+```
+
+<!-- #region id="59d66483-809c-42cd-83cc-1df37b2ac03b" -->
+# Load Data
+<!-- #endregion -->
+
+```{python id="c3bf8c80-331a-422d-b3fc-767014924b4d"}
+def load_data(file_paths):
+    df = pd.read_parquet(file_paths).reset_index()
+    return df
+```
+
+<!-- #region id="f5Ibr4lHOQiV" -->
+## Linear regression model
+<!-- #endregion -->
+
+```{python colab={'base_uri': 'https://localhost:8080/', 'height': 221}, id="ba8e0e25-6409-45ea-be8d-5a8e32f024a4", outputId="bb72bfd1-7613-4d86-971f-910f199de73c"}
+lr_rides_df = load_data(LR_PATH)
+
+print(lr_rides_df.shape)
+lr_rides_df.head()
+```
+
+<!-- #region id="FtK0syuqOVKr" -->
+## XGBoost model
+<!-- #endregion -->
+
+```{python colab={'base_uri': 'https://localhost:8080/', 'height': 221}, id="cf2f6e6a-7a39-4da6-a892-9f5d28350c70", outputId="f171c01c-aa0d-45c1-ed88-98f5c92619fc"}
+xgb_rides_df = load_data(XGB_PATH)
+
+print(xgb_rides_df.shape)
+xgb_rides_df.head()
+```
+
+<!-- #region id="VaKXf25m8IrY" -->
+# Evaluation
+<!-- #endregion -->
+
+```{python id="ecc72916-1c86-4a5d-924d-fbe5004b63af"}
+predictions_dict = {
+    'baseline_last_week' : None,
+    'regression_model' : None,
+    'xgboost_model' : None
+}
+
+predictions_dict['regression_model'] = lr_rides_df[
+    [
+        'date',
+        'time_interval_number',
+        'PULocationID',
+        'predicted demand'
+    ]
+]
+
+predictions_dict['xgboost_model'] = xgb_rides_df[
+    [
+        'date',
+        'time_interval_number',
+        'PULocationID',
+        'predicted demand'
+    ]
+]
+
+predictions_dict['baseline_last_week'] = xgb_rides_df[
+    [
+        'date',
+        'time_interval_number',
+        'PULocationID',
+        'last_week_demand'
+    ]
+].rename(
+    columns = {'last_week_demand' : 'predicted demand'}
+)
+```
+
+<!-- #region id="c1cc7f57-e116-4e55-9ba5-e8ab8052f4f1" -->
+## Report by Metrics
+<!-- #endregion -->
+
+<!-- #region id="9ea63815-85cf-49df-b381-5e5f79823d11" -->
+### Calculate metrics for all predictions model per all LocationIDs
+<!-- #endregion -->
+
+```{python colab={'base_uri': 'https://localhost:8080/', 'height': 221}, id="693a7f62-1ff1-4b8c-b155-814834d27b7e", outputId="7cbaa250-543f-4c7d-d013-d79aa4c0dc2f"}
+PULocationIDs_Metrics = {}
+PULocationIDs = xgb_rides_df['PULocationID'].unique()
+PULocationIDs.sort()
+metrics_all = []
+for i in range(1, 9):
+    for key in predictions_dict:
+        for locationID in PULocationIDs:
+            selected_df_model = predictions_dict[key][
+                (predictions_dict[key]['PULocationID'] == locationID) &
+                (predictions_dict['xgboost_model']['time_interval_number'] == i)
+            ]
+            selected_df_actual = xgb_rides_df[
+                (xgb_rides_df['PULocationID'] == locationID) &
+                (xgb_rides_df['time_interval_number'] == i)
+            ]
+            if selected_df_actual.shape[0] != 0:
+              metric_mape = mean_absolute_percentage_error(
+                  selected_df_actual['real demand'],
+                  selected_df_model['predicted demand']
+              )
+              metric_mae = mean_absolute_error(
+                  selected_df_actual['real demand'],
+                  selected_df_model['predicted demand']
+              )
+              metric_mse = mean_squared_error(
+                  selected_df_actual['real demand'],
+                  selected_df_model['predicted demand'],
+              )
+              metric_rmse = math.sqrt(metric_mse)
+              metrics_all.append(
+                  {
+                      'PULocationID' : locationID,
+                      'time_interval_number' : i,
+                      'Model': key,
+                      'MAPE': metric_mape,
+                      'MAE': metric_mae,
+                      'RMSE': metric_rmse
+                  }
+              )
+    PULocationIDs_Metrics[i] = pd.DataFrame(metrics_all)
+    metrics_all=[]
+
+print(PULocationIDs_Metrics[1].shape)
+PULocationIDs_Metrics[1].head()
+```
+
+<!-- #region id="85004597-8c47-4b60-a9e3-24743fa3fdab" -->
+# Visualization
+<!-- #endregion -->
+
+<!-- #region id="b6450fdf-e1f7-4a9e-8444-f20439d0be62" -->
+## Compare Models prediction vs. Last week count base on MAPE metric
+<!-- #endregion -->
+
+```{python id="58ae5e76-e0f3-469a-9f78-7437c5956448"}
+def plot_model_metric(df, sorted_df, lower, upper, metrics, interval):
+    PULocationIDs_Metrics_Selected = sorted_df[
+        sorted_df['PULocationID'].isin(df.iloc[lower:upper, 0])
+    ]
+    PULocationIDs_Metrics_Selected = PULocationIDs_Metrics_Selected.copy()
+    PULocationIDs_Metrics_Selected['PULocationID'] = PULocationIDs_Metrics_Selected['PULocationID'].astype('str')
+    plt.figure(figsize = (20, 5) , clear = True)
+    sns.lineplot(
+        data = PULocationIDs_Metrics_Selected,
+        x = 'PULocationID',
+        y = metrics,
+        hue = 'Model'
+    )
+    plt.xticks(rotation = 90)
+    plt.title(f'Metric {metrics} For Location Id and time interval {interval} ')
+    plt.show()
+```
+
+```{python id="fa46dff0"}
+xgb_rides_df_sorted = {}
+PULocationIDs_Metrics_sorted = {}
+for i in range(1, 9):
+      xgb_rides_df_sorted[i] = xgb_rides_df.query(
+          "time_interval_number == @i"
+      ).groupby(['PULocationID', 'time_interval_number'])[['real demand']].mean().sort_values(
+          'real demand',
+          ascending = False
+      ).reset_index()
+      dummy = pd.Series(xgb_rides_df_sorted[i]['PULocationID']).to_frame()
+      PULocationIDs_Metrics_sorted[i] = pd.merge(
+          dummy,
+          PULocationIDs_Metrics[i],
+          on = 'PULocationID',
+          how = 'left'
+      )
+```
+
+<!-- #region id="3b2a0768" -->
+### checking
+<!-- #endregion -->
+
+```{python colab={'base_uri': 'https://localhost:8080/', 'height': 142}, id="f9e5d226", outputId="5dbbf963-0621-4ced-8430-af4cb2787571"}
+PULocationIDs_Metrics_sorted[1][PULocationIDs_Metrics_sorted[1]['PULocationID'] == 79]
+```
+
+<!-- #region id="30b70361-76c7-4006-9fff-f62c541287df" -->
+### High Demand
+<!-- #endregion -->
+
+```{python colab={'base_uri': 'https://localhost:8080/', 'height': 1000}, id="34fe56c0-2ae5-4e26-9eb7-2e2effd4c751", outputId="ed80c313-aaf9-4b72-839a-7c158fa22567"}
+for interval in range(1, 9):
+    plot_model_metric(
+        xgb_rides_df_sorted[interval],
+        PULocationIDs_Metrics_sorted[interval],
+        0,
+        50,
+        'MAPE',
+        interval
+    )
+```
+
+<!-- #region id="bffb3ba4-25a4-43fd-8168-27fa14665510" -->
+### Mid Demand
+<!-- #endregion -->
+
+```{python colab={'base_uri': 'https://localhost:8080/', 'height': 1000}, id="41679f0e", outputId="ce63084a-afdb-4123-855f-b2a69b983412"}
+for interval in range(1, 9):
+    plot_model_metric(
+        xgb_rides_df_sorted[interval],
+        PULocationIDs_Metrics_sorted[interval],
+        50,
+        150,
+        'MAE',
+        interval
+    )
+```
+
+<!-- #region id="3d7a4a95-c2c0-435e-b434-08a03df4a458" -->
+### Low Demand
+<!-- #endregion -->
+
+```{python colab={'base_uri': 'https://localhost:8080/', 'height': 1000}, id="414f3f29", outputId="88422b6c-a4b8-402a-b4de-d22347cec1f2"}
+for interval in range(1, 9):
+    plot_model_metric(
+        xgb_rides_df_sorted[interval],
+        PULocationIDs_Metrics_sorted[interval],
+        150,
+        250,
+        'MAE',
+        interval
+    )
+```
+
+<!-- #region id="53c11056-e4f4-48e6-8bda-1ebbf0238ea0" -->
+## Compare Models prediction vs. Last day count based on actual count
+<!-- #endregion -->
+
+```{python id="e690d7cb-e29b-4397-865d-07cf42e7c74f"}
+def plot_model_actual(actual_data, pred_dict, interval, lower_bound = 0, upper_bound = 262):
+    selected_df_model = actual_data.groupby('PULocationID')[['real demand']].mean().sort_values(
+        'real demand',
+        ascending = False
+    ).reset_index()
+
+    selected_df_model = selected_df_model.iloc[lower_bound:upper_bound]
+
+    plt.figure(figsize = (18, 5))
+    plt.scatter(
+        selected_df_model.index,
+        selected_df_model['real demand'],
+        label = "Actual",
+        color = 'red',
+        s = 15
+    )
+    for key in pred_dict:
+        sorted_df = pd.merge(
+            selected_df_model['PULocationID'],
+            pred_dict[key],
+            on = 'PULocationID',
+            how = 'left'
+        )
+        sorted_df = sorted_df.groupby('PULocationID')[['predicted demand']].mean().sort_values(
+            'predicted demand',
+            ascending = False
+        ).reset_index()
+        plt.plot(
+            selected_df_model.index,
+            sorted_df['predicted demand'],
+            label = key
+        )
+
+    plt.xticks(
+        selected_df_model.index,
+        selected_df_model['PULocationID'],
+        rotation = 90
+    )
+
+    plt.legend()
+    plt.xlabel('PULocationID')
+    plt.ylabel('Counts')
+    plt.title(f'Demand count compare models predictions vs. actual in time interval {interval}')
+
+    plt.show()
+```
+
+```{python id="uFV9mPz1Hk-L"}
+def plot_separated_demand(predictions_dict, xgb_rides_df, lower_bound, upper_bound):
+  for interval in range(1, 9):
+      temp = {
+        'baseline_last_week' : pd.DataFrame(),
+        'regression_model' : pd.DataFrame(),
+        'xgboost_model' : pd.DataFrame()
+      }
+      for key in predictions_dict.keys():
+        temp[key] = temp[key].append(predictions_dict[key][predictions_dict[key]['time_interval_number'] == interval])
+      plot_model_actual(
+          xgb_rides_df[xgb_rides_df['time_interval_number'] == interval],
+          temp,
+          interval,
+          lower_bound,
+          upper_bound
+      )
+```
+
+<!-- #region id="2930a298-279d-482b-867f-ee05789a82ba" -->
+### High Demand
+<!-- #endregion -->
+
+```{python colab={'base_uri': 'https://localhost:8080/', 'height': 1000}, id="Wly6MjzKHKaE", outputId="4858a7cf-8b38-41c7-8d7f-771825d044d3"}
+plot_separated_demand(predictions_dict, xgb_rides_df, 0, 50)
+```
+
+<!-- #region id="3cf0ce13-b71f-497a-a4e9-bb9afbf3cd64" -->
+### Mid Demand
+<!-- #endregion -->
+
+```{python colab={'base_uri': 'https://localhost:8080/', 'height': 1000}, id="PANwB_q_HTYp", outputId="bd0b8172-8d8f-44d9-d07f-12e6cdb312fc"}
+plot_separated_demand(predictions_dict, xgb_rides_df, 50, 150)
+```
+
+<!-- #region id="44c7a894-2f06-46b3-b750-3f8a38957e88" -->
+### Low Demand
+<!-- #endregion -->
+
+```{python colab={'base_uri': 'https://localhost:8080/', 'height': 1000}, id="WtNqmz9tHcXM", outputId="af5baefe-56c9-481b-bf70-497290d683b0"}
+plot_separated_demand(predictions_dict, xgb_rides_df, 150, 250)
+```
+
+<!-- #region id="7f03fc4c-fec0-4c3c-bf78-acd5236aa527" -->
+# Model prediction results in metrics
+
+Metrics: MAPE, MAE, RMSE
+<!-- #endregion -->
+
+```{python id="cdbb5c78-faaa-43ca-8e4a-e6adad5744cf"}
+def calculate_metrics(df, sorted_df, lower = 0, upper = 266):
+    PULocationIDs_Metrics_Selected = sorted_df[
+        sorted_df['PULocationID'].isin(df.iloc[lower:upper, 0])
+    ]
+    PULocationIDs_Metrics_Selected = PULocationIDs_Metrics_Selected.copy()
+    PULocationIDs_Metrics_Selected['PULocationID'] = PULocationIDs_Metrics_Selected['PULocationID'].astype('str')
+    predictions_result = []
+    for key in predictions_dict:
+        metric_mape = PULocationIDs_Metrics_Selected[
+            PULocationIDs_Metrics_Selected['Model'] == key
+        ]['MAPE'].mean()
+        metric_mae = PULocationIDs_Metrics_Selected[
+            PULocationIDs_Metrics_Selected['Model'] == key
+        ]['MAE'].mean()
+        metric_rmse = PULocationIDs_Metrics_Selected[
+            PULocationIDs_Metrics_Selected['Model'] == key
+        ]['RMSE'].mean()
+        predictions_result.append(
+            {
+                'Model' : key,
+                f"MAPE_{lower}-{upper}" : metric_mape,
+                f"MAE_{lower}-{upper}" : metric_mae,
+                f"RMSE_{lower}-{upper}" : metric_rmse
+            }
+        )
+    return predictions_result
+```
+
+```{python id="1wmIFJE-gpd1"}
+high_demand_df = {}
+mid_demand_df = {}
+low_demand_df = {}
+
+def split_by_demand(lower_bound, upper_bound,interval):
+  df = pd.DataFrame()
+  df = df.append(
+    pd.DataFrame(
+        calculate_metrics(
+            xgb_rides_df_sorted[interval],
+            PULocationIDs_Metrics_sorted[interval],
+            lower_bound,
+            upper_bound
+        )
+    )
+  )
+  return df
+
+for interval in range(1, 9):
+    high_demand_df[interval] = split_by_demand(0, 50, interval)
+    mid_demand_df[interval] = split_by_demand(50, 150, interval)
+    low_demand_df[interval] = split_by_demand(150, 250, interval)
+```
+
+```{python id="cdac0de1", outputId="90cb2483-4e13-40c0-f3b2-085d91a09030", colab={'base_uri': 'https://localhost:8080/', 'height': 142}}
+high_demand_df[4]
+```
+
+<!-- #region id="c8da3f6d-6943-4052-80db-5dc3af629e5c" -->
+Merging all the results together and sort them
+<!-- #endregion -->
+
+```{python id="c083900e-d5d3-4cab-8e5f-0cc6227013b2"}
+merged_result_df = {}
+for interval in range(1, 9):
+    merged_result_df[interval] = high_demand_df[interval].merge(
+        mid_demand_df[interval],
+        on = 'Model'
+    ).merge(
+        low_demand_df[interval],
+        on = 'Model'
+    )
+```
+
+```{python id="dbc49f6d", outputId="f6888a03-2d0f-4fd4-f20b-439fbfd1e961", colab={'base_uri': 'https://localhost:8080/', 'height': 1000}}
+for interval in range(1, 9):
+    display(f"interval: {interval}",merged_result_df[interval])
+```
+
+<!-- #region id="lp6UE64hbiMi" -->
+Defining a custom sorting function to extract the numeric suffix and sort the columns accordingly
+<!-- #endregion -->
+
+```{python colab={'base_uri': 'https://localhost:8080/', 'height': 1000}, id="10a19693-b0dd-4563-8186-be842ec1c569", outputId="924839cf-a165-4494-f6e7-9491368ee0e1"}
+def sort_columns_key(column):
+    if column == 'Model':
+        return (0, '')
+    metric, suffix = column.split('_')
+    return (
+        1,
+        metric,
+        int(suffix.split('-')[0]),
+        int(suffix.split('-')[1])
+    )
+
+for interval in range(1, 9):
+    sorted_columns = sorted(
+        merged_result_df[interval].columns,
+        key = sort_columns_key
+    )
+    predictions_result = merged_result_df[interval][sorted_columns]
+    display(f"interval: {interval}",predictions_result)
+```

@@ -1,0 +1,153 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.14.4
+  kernelspec:
+    display_name: Python 3 (ipykernel)
+    language: python
+    name: python3
+---
+
+<!-- #region id="XetvxEdeP_9R" -->
+# Feature Selection
+<!-- #endregion -->
+
+### Import modules
+
+```{python id="SKFmAIzF5K8j"}
+import numpy as np
+import pandas as pd
+import warnings
+from itertools import product
+
+warnings.simplefilter('ignore')
+```
+
+### Config
+
+```{python}
+DATA_FILE_PATHS = '/workspace/rahnemacollege/Project/Git/demand-prediction/data/input/'
+
+OUTPUT_PATH_FEAT = '/workspace/rahnemacollege/Project/Git/demand-prediction/data/label/feat_p2.parquet'
+
+start_date = '2023-01-01'
+end_date = '2023-05-01'
+
+number_interval_per_day = 8
+```
+
+<!-- #region id="rluQ2Egj6oBm" -->
+### Load Data
+<!-- #endregion -->
+
+```{python id="tssiMQFc6niv"}
+def load_data(file_paths, interval: int, start_date=None, end_date=None):
+    df = pd.read_parquet(file_paths)
+    df['date'] = df['tpep_pickup_datetime'].dt.date.astype(str)
+
+    if start_date:
+        if end_date:
+            df = df[(df['date'] >= start_date) & (
+                df['date'] < end_date)]
+        else:
+            df = df[df['date'] > start_date].reset_index(drop=True)
+    # Sort the DataFrame based on the 'tpep_pickup_datetime' column in ascending order
+    df = df.sort_values(by='date')
+    df = df.reset_index(drop=True)
+
+    interval_per_day = int(24/interval)
+
+    # Calculate the start time of each interval
+    df['interval_start'] = df['tpep_pickup_datetime'].dt.floor(
+        f"{interval_per_day}H")
+
+    # Calculate the end time of each interval
+    df['interval_end'] = df['interval_start'] + \
+        pd.Timedelta(hours=interval_per_day)
+
+    # Create a new column with the time interval in the desired format
+    df['time_interval'] = df['interval_start'].dt.strftime(
+        '%H:%M:%S') + ' - ' + df['interval_end'].dt.strftime('%H:%M:%S')
+
+    # Drop 'interval_start' and 'interval_end' columns
+    df.drop(columns=['interval_start', 'interval_end'], inplace=True)
+
+    # Create bins for interval numbers from 1 to interval
+    df['time_interval_number'] = pd.cut(
+        df['tpep_pickup_datetime'].dt.hour, bins=interval, labels=range(1, interval + 1), right=False)
+
+    return df
+```
+
+```{python tags=c()}
+rides_df = load_data(
+    DATA_FILE_PATHS, number_interval_per_day, start_date, end_date)
+print(rides_df.shape)
+rides_df.head()
+```
+
+### Aggregate data and labeling
+
+```{python}
+def labeling_by_interval(rides_df: pd.DataFrame):
+    aggregated_df = rides_df.groupby(
+        ['date', 'time_interval_number', 'PULocationID']).size().reset_index(name='count')
+    unique_dates = rides_df['date'].unique()
+    unique_interval = rides_df['time_interval_number'].unique()
+    unique_pu_location_ids = rides_df['PULocationID'].unique()
+    all_combinations = list(
+        product(unique_dates, unique_interval, unique_pu_location_ids))
+    combinations_df = pd.DataFrame(all_combinations, columns=[
+                                   'date', 'time_interval_number', 'PULocationID'])
+    label_df = aggregated_df.merge(combinations_df, how='right', on=[
+                                   'date', 'time_interval_number', 'PULocationID']).fillna(0)
+    # Sort based on two columns: 'time_interval_number' (ascending) and 'date' (ascending)
+    label_df = label_df.sort_values(
+        by=['date', 'time_interval_number'], ascending=[True, True])
+    return label_df
+```
+
+```{python}
+labels_time_df = labeling_by_interval(rides_df)
+print(labels_time_df.shape)
+labels_time_df.head()
+```
+
+### Adding features
+
+```{python}
+def adding_feature(rides_df: pd.DataFrame, interval: int):
+    rides_df['date'] = rides_df['date'].astype('datetime64[ns]')
+    rides_df['PU_day_of_month'] = rides_df['date'].dt.day.astype(np.uint8)
+    rides_df['PU_day_of_week'] = rides_df['date'].dt.weekday.astype(np.uint8)
+    rides_df = rides_df.sort_values(
+        ['PULocationID', 'date', 'time_interval_number'])
+    rides_df['last_day_demand'] = rides_df.groupby(['PULocationID'])[
+        'count'].shift(interval)
+    rides_df['last_week_demand'] = rides_df.groupby(['PULocationID'])[
+        'count'].shift(interval * 7)
+
+    return rides_df
+```
+
+```{python}
+labels_time_df_feat = adding_feature(labels_time_df, number_interval_per_day)
+print(labels_time_df_feat.shape)
+labels_time_df_feat.head()
+```
+
+### Checking two days of data as a sample
+
+```{python}
+labels_time_df_feat[(labels_time_df_feat['PULocationID'] == 79)].tail(16)
+```
+
+### Save features engineering  data
+
+```{python id="sk32WEWjpVdB"}
+labels_time_df_feat.to_parquet(OUTPUT_PATH_FEAT)
+```

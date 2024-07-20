@@ -1,0 +1,109 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.14.4
+  kernelspec:
+    display_name: Python 3 (ipykernel)
+    language: python
+    name: python3
+---
+
+<!-- #region id="XetvxEdeP_9R" -->
+# Feature Selection
+<!-- #endregion -->
+
+```{python id="SKFmAIzF5K8j"}
+import datetime
+import numpy as np
+import pandas as pd
+import time
+import warnings
+
+from itertools import product
+from sklearn.model_selection import train_test_split
+
+warnings.simplefilter('ignore')
+```
+
+### config
+
+```{python}
+DATA_FILE_PATHS = 'D:/rahnema/final project/dataset/'
+OUTPUT_PATH = 'D:/rahnema/final project/label/feature.parquet'
+START_DATE = '2023-01-01'
+```
+
+<!-- #region id="rluQ2Egj6oBm" -->
+### Load Data
+<!-- #endregion -->
+
+```{python id="tssiMQFc6niv"}
+def load_data(file_paths, start_date=None):
+    df = pd.read_parquet(file_paths)
+    df['date'] = df['tpep_pickup_datetime'].dt.date.astype(str)
+
+    if start_date:
+        df = df[df['date'] > start_date].reset_index(drop=True)
+
+    return df
+
+
+rides_df = load_data(DATA_FILE_PATHS, START_DATE)
+print(rides_df.shape)
+rides_df.head()
+```
+
+### aggregate data and labeling
+
+```{python}
+def labeling(rides_df: pd.DataFrame):
+    aggregated_df = rides_df.groupby(['date', 'PULocationID']).size().reset_index(name='count')
+    unique_dates = rides_df['date'].unique()
+    unique_pu_location_ids = rides_df['PULocationID'].unique()
+    all_combinations = list(product(unique_dates, unique_pu_location_ids))
+    combinations_df = pd.DataFrame(all_combinations, columns=['date', 'PULocationID'])
+    label_df = aggregated_df.merge(combinations_df, how='right', on=['date', 'PULocationID']).fillna(0)
+    return label_df
+
+
+rides_df = labeling(rides_df)
+print(rides_df.shape)
+rides_df.head()
+```
+
+### adding calender features
+
+```{python}
+def adding_feature(rides_df: pd.DataFrame):   
+    #rides_df['count']=rides_df['count'] + 1000
+    rides_df['date']=rides_df['date'].astype('datetime64')
+    rides_df['PU_day_of_month'] = rides_df['date'].dt.day.astype(np.uint8)
+    rides_df['PU_day_of_week'] = rides_df['date'].dt.weekday.astype(np.uint8)        
+    rides_df = rides_df.sort_values(['date'])    
+    rides_df['last_day_demand'] = rides_df.groupby(['PULocationID'])['count'].shift(1)    
+    rides_df['last_week_demand'] = rides_df.groupby(['PULocationID'])['count'].shift(7)
+    
+    return rides_df
+
+rides_df=adding_feature(rides_df)
+print(rides_df.shape)
+rides_df.head()
+```
+
+### checking one week of data as a sample
+
+```{python}
+rides_df[(rides_df['PULocationID'] == 79)].tail(8)
+```
+
+```{python id="sk32WEWjpVdB"}
+rides_df.to_parquet(OUTPUT_PATH)
+```
+
+```{python}
+
+```

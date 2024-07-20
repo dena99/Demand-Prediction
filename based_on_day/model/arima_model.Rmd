@@ -1,0 +1,246 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.14.4
+  kernelspec:
+    display_name: Python 3
+    language: python
+    name: python3
+---
+
+### import modules
+
+```{python}
+import pandas as pd
+from statsmodels.tsa.arima.model import ARIMA
+import numpy as np
+```
+
+### ignore warnings
+
+```{python}
+import warnings
+warnings.filterwarnings('ignore')
+```
+
+### config
+
+```{python}
+LABEL_DATA_PATH = 'D:/projects/rahnamcollege-ml/demand-prediction/data/label/label.parquet'
+ARIMA_MODELS_PATH = 'D:/projects/rahnamcollege-ml/demand-prediction/model/arima_models/'
+OUTPUT_PATH = 'D:/projects/rahnamcollege-ml/demand-prediction/data/arima_output.xlsx'
+TRAIN_TEST_SPLIT_DATE = '2023-04-01'
+DATA_LAST_DATE = '2023-04-31'
+ADDED_PASSENGER_COUNT = 100
+HIGH_DEMAND_THRESHOLD = 1000
+
+TESTING_ARIMA_ORDERS = [
+    (4, 2, 1),
+    (5, 1, 2),
+    (4, 2, 1),
+    (1, 2, 2),
+    (6, 1, 4)
+]
+```
+
+### load data
+
+```{python}
+rides_df = pd.read_parquet(LABEL_DATA_PATH)
+rides_df = rides_df[rides_df['date'] < DATA_LAST_DATE].reset_index(drop=True)
+print(rides_df.shape)
+rides_df.head()
+```
+
+```{python}
+
+```
+
+### prepare data
+
+```{python}
+def train_test_split(df, split_date):
+    train_df = df[df['date'] < split_date]
+    test_df = df[df['date'] >= split_date]
+    return train_df, test_df
+
+train_df, test_df = train_test_split(rides_df, TRAIN_TEST_SPLIT_DATE)
+
+print(train_df.shape)
+train_df.head()
+```
+
+### seprate locations data
+
+```{python}
+train_location_dfs = {}
+test_location_dfs = {}
+
+
+location_ids = train_df['PULocationID'].unique()
+
+for location_id in location_ids:
+    train_location_dfs[location_id] = train_df[
+        train_df['PULocationID'] == location_id].sort_values(by=['date']).reset_index(drop=True)
+    
+    test_location_dfs[location_id] = test_df[
+        test_df['PULocationID'] == location_id].sort_values(by=['date']).reset_index(drop=True)
+```
+
+### train model
+
+```{python}
+def train_arima_model(count_series, order):
+    model = ARIMA(count_series, order=order)
+    fitted_model = model.fit()
+    return fitted_model
+
+
+models = {}
+
+for location_id, location_df in train_location_dfs.items():
+    ## smooth label.
+    count_series = location_df['count'] + ADDED_PASSENGER_COUNT
+    models[location_id] = train_arima_model(count_series, order=(3, 1, 3))
+```
+
+### predict test data
+
+```{python}
+def predict_passenger_count(location_id, model=None):
+    train_df = train_location_dfs[location_id]
+    test_df = test_location_dfs[location_id]
+    model = model or models[location_id]
+    start_index = len(train_df)
+    end_index = len(train_df) + len(test_df)
+    
+    return model.predict(start=start_index + 1, end=end_index, typ='levels')
+    
+```
+
+```{python}
+for location_id in location_ids:
+    test_df = test_location_dfs[location_id]
+    pred = predict_passenger_count(location_id) - ADDED_PASSENGER_COUNT
+    pred = pred.apply(lambda x: max(0, int(x)))
+    test_df['pred'] = pred.values
+```
+
+### concat test dataframes
+
+```{python}
+pred_df = pd.concat(test_location_dfs.values())
+print(pred_df.shape)
+pred_df.head()
+```
+
+### evaluate loss
+
+```{python}
+from sklearn.metrics import mean_absolute_error, mean_absolute_percentage_error, mean_squared_error
+```
+
+```{python}
+def evaluate_model(actual, pred):
+    mae = mean_absolute_error(actual, pred)
+    mape = mean_absolute_percentage_error(actual, pred)
+    mse = mean_squared_error(actual, pred)
+
+    print(f'mape = {mape}')
+    print(f'mae = {mae}')
+    print(f'rmse = {np.sqrt(mse)}')
+
+evaluate_model(pred_df['count'], pred_df['pred'])
+```
+
+### testing arima model with some order parameters
+
+```{python}
+def evaluate_custom_order_arima(arima_order_parameter):
+    for location_id in location_ids:
+        train_df = train_location_dfs[location_id]
+        test_df = test_location_dfs[location_id]
+        
+        series = train_df['count'] + ADDED_PASSENGER_COUNT
+        model = train_arima_model(series, arima_order_parameter)
+        
+        pred = predict_passenger_count(location_id, model) - ADDED_PASSENGER_COUNT
+        pred = pred.apply(lambda x: max(0, int(x)))
+        test_df['pred'] = pred.values
+    pred_df = pd.concat(test_location_dfs.values())
+    
+    mae = mean_absolute_error(pred_df['count'], pred_df['pred'])
+    mape = mean_absolute_percentage_error(pred_df['count'], pred_df['pred'])
+    rmse = np.sqrt(mean_squared_error(pred_df['count'], pred_df['pred']))
+    
+    return {'mae': mae, 'mape': mape, 'rmse': rmse}  
+```
+
+```{python}
+for order in TESTING_ARIMA_ORDERS:
+    results = evaluate_custom_order_arima(order)
+    
+    print('order:', order)
+    print('\n'.join([f'{key} = {value}' for key, value in results.items()]))
+    print('\n ----- \n')
+```
+
+### recreate best model in expriments
+
+```{python}
+models = {}
+
+for location_id, location_df in train_location_dfs.items():
+    ## smooth label.
+    count_series = location_df['count'] + ADDED_PASSENGER_COUNT
+    models[location_id] = train_arima_model(count_series, order=(3, 1, 3))
+```
+
+### add fitted values
+
+```{python}
+dfs = []
+
+for location_id in location_ids:
+    train_df = train_location_dfs[location_id]
+    model = models[location_id]
+    train_df['pred'] = model.fittedvalues.values - ADDED_PASSENGER_COUNT
+    test_df = test_location_dfs[location_id]
+    pred = predict_passenger_count(location_id) - ADDED_PASSENGER_COUNT
+    test_df['pred'] = pred.values
+    dfs.append(train_df)
+    dfs.append(test_df)
+
+result_df = pd.concat(dfs)
+result_df['pred'] = result_df['pred'].apply(lambda x: max(0, int(x)))
+
+print(result_df.shape)
+result_df.head()
+    
+```
+
+### evaluate on high demand locations
+
+```{python}
+mean_counts = rides_df.groupby('PULocationID')['count'].mean()
+true_items_location_ids = mean_counts[mean_counts > HIGH_DEMAND_THRESHOLD].index.tolist()
+high_demand_df = result_df[result_df['PULocationID'].isin(true_items_location_ids)]
+print(high_demand_df.shape)
+high_demand_df.head()
+```
+
+```{python}
+high_demand_df = high_demand_df[high_demand_df['pred'] > 0]
+
+evaluate_model(high_demand_df['count'], high_demand_df['pred'])
+```
+
+### save results
+
+```{python}
+result_df.to_excel(OUTPUT_PATH)
+```

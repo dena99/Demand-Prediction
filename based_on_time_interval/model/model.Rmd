@@ -1,0 +1,532 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.14.7
+  kernelspec:
+    display_name: Python 3
+    name: python3
+---
+
+<!-- #region id="KcBNv2YLohK9" -->
+# imports
+<!-- #endregion -->
+
+```{python id="YyX5k-wBqY14"}
+import datetime
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import time
+import warnings
+
+from datetime import date
+from itertools import product
+from sklearn.metrics import accuracy_score
+from sklearn.model_selection import GridSearchCV
+from sklearn.preprocessing import LabelEncoder
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_absolute_percentage_error
+from sklearn.metrics import mean_absolute_error
+from sklearn.metrics import mean_squared_error
+from sklearn.model_selection import train_test_split
+from xgboost import XGBRegressor
+
+warnings.simplefilter('ignore')
+```
+
+<!-- #region id="qwqNfi6NQV_v" -->
+# Config
+<!-- #endregion -->
+
+```{python id="VyDYzlYcQU2M"}
+DATA_FILE_PATHS = '/content/drive/MyDrive/RC/data/'
+START_DATE = '2023-01-01'
+END_DATE = '2023-05-01'
+TEST_DATE = '2023,4,1'
+LAST_DATE = '2023,5,1'
+FEATURE_LIST = [
+    'time_interval_number',
+    'PU_day_of_week',
+    'last_day_demand',
+    'last_week_demand'
+]
+TARGET = 'count'
+VALIDATION_SPLIT_RATIO = 0.2
+NUMBER_INTERVAL_PER_DAY = 8
+TIME_INTERVAL_LR_OUTPUT_PATH = '/content/drive/MyDrive/RC/output/time_interval_lr_result.parquet'
+TIME_INTERVAL_XGB_OUTPUT_PATH = '/content/drive/MyDrive/RC/output/time_interval_XGB_result.parquet'
+```
+
+<!-- #region id="StaYCoWf96ac" -->
+# Load Data
+<!-- #endregion -->
+
+```{python colab={'base_uri': 'https://localhost:8080/', 'height': 399}, id="xHhClYpr0nD1", outputId="002f89f8-2775-47d4-a99e-66e5ad227b30"}
+def load_data(file_paths, interval : int, start_date = None, end_date = None):
+    df = pd.read_parquet(file_paths)
+    df['date'] = df['tpep_pickup_datetime'].dt.date.astype(str)
+
+    if start_date:
+        if end_date:
+            df = df[
+                (df['date'] >= start_date) & (df['date'] < end_date)
+            ]
+        else:
+            df = df[df['date'] > start_date].reset_index(drop = True)
+    df = df.sort_values(by = 'date')
+    df = df.reset_index(drop = True)
+    interval_per_day = int(24 / interval)
+
+    df['interval_start'] = df['tpep_pickup_datetime'].dt.floor(f"{interval_per_day}H")
+    df['interval_end'] = df['interval_start'] + \
+        pd.Timedelta(hours=interval_per_day)
+    df['time_interval'] = df['interval_start'].dt.strftime(
+        '%H:%M:%S') + ' - ' + df['interval_end'].dt.strftime('%H:%M:%S')
+    df.drop(
+        columns = ['interval_start', 'interval_end'],
+        inplace = True
+    )
+    df['time_interval_number'] = pd.cut(
+        df['tpep_pickup_datetime'].dt.hour,
+        bins = interval,
+        labels = range(1, interval + 1),
+        right = False
+    )
+
+    return df
+
+rides_df = load_data(
+    DATA_FILE_PATHS,
+    NUMBER_INTERVAL_PER_DAY,
+    START_DATE,
+    END_DATE
+)
+print(rides_df.shape)
+rides_df.head()
+```
+
+<!-- #region id="FUks4V5XAXlv" -->
+# aggregate data and labeling
+<!-- #endregion -->
+
+```{python colab={'base_uri': 'https://localhost:8080/', 'height': 221}, id="VXmAOdlS_t1L", outputId="0f4dba90-9d2d-4034-a4de-68ede782eb29"}
+def labeling_by_interval(rides_df : pd.DataFrame):
+    aggregated_df = rides_df.groupby(
+        [
+            'date',
+            'time_interval_number',
+            'PULocationID'
+        ]
+    ).size().reset_index(name = 'count')
+    unique_dates = rides_df['date'].unique()
+    unique_interval = rides_df['time_interval_number'].unique()
+    unique_pu_location_ids = rides_df['PULocationID'].unique()
+    all_combinations = list(
+        product(
+            unique_dates,
+            unique_interval,
+            unique_pu_location_ids
+        )
+    )
+    combinations_df = pd.DataFrame(
+        all_combinations,
+        columns = ['date', 'time_interval_number', 'PULocationID']
+    )
+    label_df = aggregated_df.merge(
+        combinations_df,
+        how = 'right',
+        on = ['date', 'time_interval_number', 'PULocationID']
+    ).fillna(0)
+    label_df = label_df.sort_values(
+        by = ['date', 'time_interval_number'],
+        ascending = [
+            True,
+            True
+        ]
+    )
+    return label_df
+
+rides_df = labeling_by_interval(rides_df)
+
+print(rides_df.shape)
+rides_df.head()
+```
+
+<!-- #region id="Cq8RnMF1Hz1H" -->
+# Feature Extraction
+<!-- #endregion -->
+
+<!-- #region id="_y2dkjlCCnsh" -->
+## adding calender features
+<!-- #endregion -->
+
+```{python colab={'base_uri': 'https://localhost:8080/', 'height': 221}, id="B0ICQlqFLY7W", outputId="1de519d1-f83d-4039-acf9-ee148e4484be"}
+def adding_feature(rides_df : pd.DataFrame, interval : int):
+    rides_df['date'] = rides_df['date'].astype('datetime64[ns]')
+    rides_df['PU_day_of_week'] = rides_df['date'].dt.weekday.astype(np.uint8)
+    rides_df = rides_df.sort_values(
+        [
+            'PULocationID',
+            'date',
+            'time_interval_number'
+        ]
+    )
+    rides_df['last_day_demand'] = rides_df.groupby(['PULocationID'])['count'].shift(interval)
+    rides_df['last_week_demand'] = rides_df.groupby(['PULocationID'])['count'].shift(interval * 7)
+    return rides_df
+
+rides_df['count'] = rides_df['count'] + 1
+rides_df = adding_feature(rides_df, NUMBER_INTERVAL_PER_DAY)
+
+print(rides_df.shape)
+rides_df.head()
+```
+
+<!-- #region id="kLcpL5VlHrXw" -->
+## checking one week of data as a sample
+<!-- #endregion -->
+
+```{python id="dSVH2ROjH_Hs", colab={'base_uri': 'https://localhost:8080/', 'height': 545}, outputId="c0b9f61a-e60f-4c15-f16a-cd6a4a07b09c"}
+rides_df[(rides_df['PULocationID'] == 79)].tail(16)
+```
+
+<!-- #region id="tvzGyWPQEM2-" -->
+## Dropping some samples
+<!-- #endregion -->
+
+```{python colab={'base_uri': 'https://localhost:8080/', 'height': 221}, id="VKDnrg9t6u84", outputId="ad7cc5f9-b0f8-45bd-8ec4-bd22ef1b67a8"}
+rides_df = rides_df.dropna()
+date = LAST_DATE.split(',')
+end_date_time = datetime.datetime(
+    int(date[0]),
+    int(date[1]),
+    int(date[2])
+)
+rides_df = rides_df[rides_df['date'] < end_date_time]
+
+print(rides_df.shape)
+rides_df.head()
+```
+
+<!-- #region id="7wZpKFTMS7Qb" -->
+## Train and Test split
+<!-- #endregion -->
+
+```{python colab={'base_uri': 'https://localhost:8080/', 'height': 269}, id="R-OC1_1yS-mF", outputId="a62ea96e-5d1f-491d-a220-e4b644f01f79"}
+def train_and_test_split(data, split_date):
+
+  date = split_date.split(',')
+  start_date_time = datetime.datetime(
+      int(date[0]),
+      int(date[1]),
+      int(date[2])
+  )
+  train_data = data[
+      rides_df['date'] < start_date_time
+  ]
+  test_data = data[
+      rides_df['date'] >= start_date_time
+  ]
+
+  train_data.set_index('date', inplace = True)
+  test_data.set_index('date', inplace = True)
+
+  pu_location_id = test_data['PULocationID']
+  train_data = train_data.drop('PULocationID', axis = 1)
+  test_data = test_data.drop('PULocationID', axis = 1)
+
+  return train_data, test_data, pu_location_id
+
+train_df, test_df, pu_location_id = train_and_test_split(
+    rides_df,
+    TEST_DATE
+)
+
+print(train_df.shape)
+print(test_df.shape)
+train_df.head()
+```
+
+<!-- #region id="aOdaGdscgNQM" -->
+## Target and Feature split
+<!-- #endregion -->
+
+```{python id="eoTmtHn-ruLL"}
+train_label_df = train_df[TARGET]
+train_df = train_df[FEATURE_LIST]
+
+test_label_df = test_df[TARGET]
+test_df = test_df[FEATURE_LIST]
+```
+
+<!-- #region id="0Ohrvwo2fwnC" -->
+## Train and Validation split
+<!-- #endregion -->
+
+```{python id="A_-X9bYeTO_j"}
+train_df, validation_df, train_label_df, validation_label_df = train_test_split(
+    train_df,
+    train_label_df,
+    test_size = VALIDATION_SPLIT_RATIO,
+    shuffle = False
+)
+```
+
+<!-- #region id="ghHG1ei3gdme" -->
+# ML Models
+<!-- #endregion -->
+
+```{python id="mdnjPVLundY2"}
+def model_training(ml_model, train_df, train_label_df, **params):
+  model = ml_model(**params)
+  model.fit(
+      train_df,
+      train_label_df
+  )
+  return model
+
+replace_negatives = np.vectorize(lambda x : 0 if x < 0 else x)
+```
+
+<!-- #region id="LN9nCqA9GSy1" -->
+## Calculate Error
+<!-- #endregion -->
+
+```{python id="wddQ_PcZqlI2"}
+def symmetric_mean_absolute_percentage_error(actual, predicted) -> float:
+	return round(
+      np.mean(
+          np.abs(predicted - actual) /
+          ((np.abs(predicted) + np.abs(actual)) / 2)
+      ), 4
+  )
+
+def error_calculator(real_demand, predicted_demand):
+  print(
+      'SMAPE: ',
+      round(
+          symmetric_mean_absolute_percentage_error(
+              real_demand,
+              predicted_demand
+          ) * 100 , 2
+      ), '%'
+  )
+  print(
+      'MAPE:  ',
+      round(
+          float(
+              mean_absolute_percentage_error(
+                  real_demand,
+                  predicted_demand
+              )
+          ) * 100, 2
+      ), '%'
+  )
+  print(
+      'MSE:   ',
+      round(
+          float(
+              mean_squared_error(
+                  real_demand,
+                  predicted_demand
+              )
+          ), 2
+      )
+  )
+  print(
+      'MAE:   ',
+      round(
+          float(
+              mean_absolute_error(
+                  real_demand,
+                  predicted_demand
+              )
+          ), 2
+      )
+  )
+```
+
+<!-- #region id="UJ9QcWTapixZ" -->
+## Linear Regression Model
+<!-- #endregion -->
+
+```{python id="P9IrrcU8iAft"}
+lr_model = model_training(
+    LinearRegression,
+    train_df,
+    train_label_df
+)
+```
+
+<!-- #region id="9ioUk22GgpFy" -->
+### Validation prediction
+<!-- #endregion -->
+
+```{python colab={'base_uri': 'https://localhost:8080/'}, id="-4qoRLP4VqFr", outputId="5539d9a8-635a-4f7a-9ef8-2c5904a294b3"}
+lr_validation_pred = replace_negatives(
+    np.round_(
+        lr_model.predict(
+            validation_df
+        )
+    )
+)
+error_calculator(
+    validation_label_df,
+    lr_validation_pred
+)
+```
+
+<!-- #region id="RtoGP9VchGKZ" -->
+### Test prediction
+<!-- #endregion -->
+
+```{python colab={'base_uri': 'https://localhost:8080/'}, id="tt6TaA5SVf65", outputId="a2a30174-db42-4a99-a236-def6595109d2"}
+lr_test_pred = replace_negatives(
+    np.round_(
+        lr_model.predict(
+            test_df
+        )
+    )
+)
+error_calculator(
+    test_label_df,
+    lr_test_pred
+)
+```
+
+<!-- #region id="2GZMbrj_4lel" -->
+### Result Data
+<!-- #endregion -->
+
+```{python colab={'base_uri': 'https://localhost:8080/', 'height': 252}, id="JvIW0Jme4len", outputId="eb993161-ed79-4765-859a-17f61fc636ed"}
+lr_result_df = test_df.copy()
+lr_result_df['PULocationID'] = pu_location_id
+lr_result_df['real demand'] = test_label_df
+lr_result_df['predicted demand'] = lr_test_pred
+
+print(lr_result_df.shape)
+lr_result_df.head()
+```
+
+```{python id="19J1PjyuG-iC"}
+lr_result_df.to_parquet(TIME_INTERVAL_LR_OUTPUT_PATH)
+```
+
+<!-- #region id="_Zx1nQT8pixc" -->
+## XGBoost Model
+<!-- #endregion -->
+
+<!-- #region id="etcdoxu8hcxW" -->
+### Hyperparameter tuning
+<!-- #endregion -->
+
+```{python colab={'base_uri': 'https://localhost:8080/'}, id="EtPJikUtoV5t", outputId="f96b8a49-d018-4288-f931-2079e9bb1645"}
+def hyper_parameter_tuning(n_estimators, learning_rate, max_depth, scoring_method):
+  parameters = {
+      'n_estimators' : n_estimators,
+      'learning_rate' : learning_rate,
+      'max_depth' : max_depth
+  }
+
+  gc = GridSearchCV(
+      XGBRegressor(),
+      parameters,
+      scoring = scoring_method
+  )
+
+  gc.fit(
+      train_df,
+      train_label_df
+  )
+
+  param = gc.best_params_
+
+  return param
+
+n_estimators = [100, 500, 700]
+learning_rate = [0.15, 0.1, 0.01]
+max_depth = [2, 3, 5]
+scoring_method = 'neg_root_mean_squared_error'
+
+param = hyper_parameter_tuning(
+    n_estimators,
+    learning_rate,
+    max_depth,
+    scoring_method
+)
+
+print(param)
+```
+
+<!-- #region id="Zo2pKnCThqTm" -->
+### XGBoost Model
+<!-- #endregion -->
+
+```{python id="4jiwwi53pBbM"}
+XGB_model = model_training(
+    XGBRegressor,
+    train_df,
+    train_label_df,
+    n_estimators = param['n_estimators'],
+    learning_rate = param['learning_rate'],
+    max_depth = param['max_depth']
+)
+```
+
+<!-- #region id="Y1ruHSFikZfu" -->
+### Validation prediction
+<!-- #endregion -->
+
+```{python colab={'base_uri': 'https://localhost:8080/'}, id="Cs6kMlFLklAP", outputId="dfdb65f0-bd4d-4ee6-a47b-e584378ade27"}
+XGB_validation_pred = replace_negatives(
+    np.round_(
+        XGB_model.predict(
+            validation_df
+        )
+    )
+)
+error_calculator(
+    validation_label_df,
+    XGB_validation_pred
+)
+```
+
+<!-- #region id="crmdtYCakcDk" -->
+### Test prediction
+<!-- #endregion -->
+
+```{python colab={'base_uri': 'https://localhost:8080/'}, id="FTeKWnmNkoWy", outputId="7ef59e06-0f22-41f2-a949-638cd0c276e6"}
+XGB_test_pred = replace_negatives(
+    np.round_(
+        XGB_model.predict(
+            test_df
+        )
+    )
+)
+error_calculator(
+    test_label_df,
+    XGB_test_pred
+)
+```
+
+<!-- #region id="-tvgz0FB4anZ" -->
+### Result Data
+<!-- #endregion -->
+
+```{python colab={'base_uri': 'https://localhost:8080/', 'height': 252}, id="t6RoOhRiMwDk", outputId="0fcce220-096d-43de-d86a-bb45050c3351"}
+XGB_result_df = test_df.copy()
+XGB_result_df['PULocationID'] = pu_location_id
+XGB_result_df['real demand'] = test_label_df
+XGB_result_df['predicted demand'] = XGB_test_pred
+
+print(XGB_result_df.shape)
+XGB_result_df.head()
+```
+
+```{python id="rN6ksHXGMtlk"}
+XGB_result_df.to_parquet(TIME_INTERVAL_XGB_OUTPUT_PATH)
+```
